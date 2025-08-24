@@ -21,8 +21,7 @@ def create_parser():
     parser.add_argument(
         "--config",
         type=str,
-        default="mcp_config.json",
-        help="MCP server configuration file (default: mcp_config.json)",
+        help="MCP server configuration file",
     )
     parser.add_argument(
         "--model",
@@ -57,12 +56,14 @@ class Agent:
         self, user_message: str, messages: List[Dict[str, Any]]
     ) -> str:
         messages.append({"role": "user", "content": user_message})
+        # print(f"{self.tools}")
 
         while True:
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 tools=self.tools if self.tools else None,
+                # max_completion_tokens=256,
             )
 
             message = response.choices[0].message
@@ -78,6 +79,7 @@ class Agent:
                 return message.content
 
             for tool_call in message.tool_calls:
+                print(f"{tool_call=}")
                 try:
                     result = await self.mcp_manager.call_tool(
                         tool_call.function.name,
@@ -88,10 +90,11 @@ class Agent:
                         {
                             "role": "tool",
                             "tool_call_id": tool_call.id,
-                            "content": json.dumps(result),
+                            "content": str(result),
                         }
                     )
                 except Exception as e:
+                    print(f"{str(e)=}")
                     messages.append(
                         {
                             "role": "tool",
@@ -130,12 +133,39 @@ class Agent:
 
         return "Available tools:\n" + "\n".join(tool_list)
 
+    def display_message_history(self, messages: List[Dict[str, Any]]) -> str:
+        if not messages:
+            return "No message history available"
+
+        history_lines = []
+        for i, message in enumerate(messages):
+            role = message.get("role", "unknown")
+            content = message.get("content", "")
+
+            if role == "user":
+                history_lines.append(f"[{i+1}] User: {content}")
+            elif role == "assistant":
+                if content:
+                    history_lines.append(f"[{i+1}] Assistant: {content}")
+                if message.get("tool_calls"):
+                    tool_calls = message.get("tool_calls", [])
+                    for tool_call in tool_calls:
+                        history_lines.append(
+                            f"[{i+1}] Tool Call: {tool_call.function.name}({tool_call.function.arguments})"
+                        )
+            elif role == "tool":
+                tool_result = content[:100] + "..." if len(content) > 100 else content
+                history_lines.append(f"[{i+1}] Tool Result: {tool_result}")
+
+        return "Message History:\n" + "\n".join(history_lines)
+
 
 async def run_chat_mode(agent: Agent, verbose: bool, messages: List[Dict[str, Any]]):
     print("Starting interactive chat mode...")
     print("Commands:")
     print("  help - Show this help")
     print("  tools - List available tools")
+    print("  messages - Show message history")
     print("  exit/quit - End session")
     print()
 
@@ -150,9 +180,12 @@ async def run_chat_mode(agent: Agent, verbose: bool, messages: List[Dict[str, An
                 print("Commands:")
                 print("  help - Show this help")
                 print("  tools - List available tools")
+                print("  messages - Show message history")
                 print("  exit/quit - End session")
             elif user_input.lower() == "tools":
                 print(agent.list_available_tools())
+            elif user_input.lower() == "messages":
+                print(agent.display_message_history(messages))
             elif user_input:
                 result = await agent.process_messages(user_input, messages)
                 print(result)
@@ -169,7 +202,7 @@ async def async_main():
     args = parser.parse_args()
 
     mcp_manager = None
-    config_path = Path(args.config)
+    config_path = Path(args.config or "")
 
     if config_path.exists():
         try:

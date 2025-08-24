@@ -76,6 +76,7 @@ class McpManagerConfig:
 class McpManager:
     def __init__(self, config: McpManagerConfig):
         self.clients: dict[str, McpClient] = {}
+        self.failed_servers: set[str] = set()
         for name, server_config in config.server_configs.items():
             self.clients[name] = McpClient(config=server_config)
 
@@ -83,22 +84,39 @@ class McpManager:
         # gather causes error
         # await asyncio.gather(*[client.__aenter__() for client in self.clients.values()])
         for name, client in self.clients.items():
-            await client.__aenter__()
+            try:
+                await client.__aenter__()
+                logger.info(f"Successfully initialized MCP server: {name}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize MCP server '{name}': {e}")
+                self.failed_servers.add(name)
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         for name, client in reversed(
             self.clients.items()
         ):  # reverse order is required!
-            await client.__aexit__(exc_type, exc_value, traceback)
+            if name not in self.failed_servers:
+                try:
+                    await client.__aexit__(exc_type, exc_value, traceback)
+                except Exception as e:
+                    logger.warning(f"Error closing MCP server '{name}': {e}")
 
     async def list_tools(self) -> list[dict]:
         gathered_tools = []
         for server_name, client in self.clients.items():
-            tools = await client.list_tools()
-            for tool in tools:
-                tool["function"]["name"] = f"{server_name}__{tool['function']['name']}"
-            gathered_tools.extend(tools)
+            if server_name not in self.failed_servers:
+                try:
+                    tools = await client.list_tools()
+                    for tool in tools:
+                        tool["function"][
+                            "name"
+                        ] = f"{server_name}__{tool['function']['name']}"
+                    gathered_tools.extend(tools)
+                except Exception as e:
+                    logger.warning(
+                        f"Error listing tools from server '{server_name}': {e}"
+                    )
         return gathered_tools
 
     async def call_tool(
@@ -109,7 +127,14 @@ class McpManager:
         server_name_and_tool_name = tool_name.split("__")
         assert len(server_name_and_tool_name) == 2
         server_name, tool_name = tuple(server_name_and_tool_name)
+
+        if server_name in self.failed_servers:
+            raise RuntimeError(f"Cannot call tool from failed server '{server_name}'")
+
         client = self.clients.get(server_name)
+        if client is None:
+            raise RuntimeError(f"MCP server '{server_name}' not found")
+
         return await client.call_tool(tool_name, arguments)
 
 
